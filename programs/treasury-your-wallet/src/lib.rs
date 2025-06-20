@@ -1,85 +1,94 @@
-import * as anchor from "@coral-xyz/anchor";
-import { Program } from "@coral-xyz/anchor";
-import { PublicKey, SystemProgram, LAMPORTS_PER_SOL, Connection, clusterApiUrl } from "@solana/web3.js";
-import { TreasuryYourWallet } from "../target/types/treasury_your_wallet";
+use anchor_lang::prelude::*;
 
-describe("🔐 Day 5: PDA Vault - SOL 입출금 (Devnet)", () => {
-  // Devnet 연결을 위한 커스텀 프로바이더 생성
-  const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
-  const wallet = anchor.Wallet.local(); // local keypair (기본 ~/.config/solana/id.json)
-  const provider = new anchor.AnchorProvider(connection, wallet, {
-    preflightCommitment: "confirmed",
-  });
-  anchor.setProvider(provider);
+declare_id!("AqejyYXgr792tntPRJajpBLMvhYCTFXQWRoBzUKp6TkN");
 
-  const program = anchor.workspace.TreasuryYourWallet as Program<TreasuryYourWallet>;
-  const user = provider.wallet;
+#[program]
+pub mod treasury_your_wallet {
+    use super::*;
 
-  let vaultPda: PublicKey;
-  let bump: number;
+    /// 초기화 - PDA 계정을 생성하고, 해당 계정의 owner를 이 프로그램으로 설정
+    pub fn initialize_vault(ctx: Context<InitializeVault>) -> Result<()> {
+        Ok(())
+    }
 
-  const seed = Buffer.from("vault");
+    /// 유저 → Vault(PDA)로 SOL 입금
+    pub fn deposit_sol_to_vault(ctx: Context<DepositSolToVault>, amount: u64) -> Result<()> {
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &ctx.accounts.user.key(),
+            &ctx.accounts.vault_account.key(),
+            amount,
+        );
+        anchor_lang::solana_program::program::invoke(
+            &ix,
+            &[
+                ctx.accounts.user.to_account_info(),
+                ctx.accounts.vault_account.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+        Ok(())
+    }
 
-  it("📌 1. Vault(PDA) 계정 생성", async () => {
-    [vaultPda, bump] = await PublicKey.findProgramAddressSync(
-      [seed, user.publicKey.toBuffer()],
-      program.programId
-    );
-    console.log("🧱 PDA 주소:", vaultPda.toBase58());
+    /// Vault(PDA) → 유저로 SOL 출금
+    pub fn withdraw_sol_from_vault(ctx: Context<WithdrawSolFromVault>, amount: u64) -> Result<()> {
+        let vault_balance = **ctx.accounts.vault_account.lamports.borrow();
 
-    const txSignature = await program.methods
-      .initializeVault()
-      .accounts({
-        vaultAccount: vaultPda,
-        user: user.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
+        require!(vault_balance >= amount, CustomError::InsufficientFunds);
 
-    console.log("✅ Vault PDA 생성 완료");
-    console.log("📄 트랜잭션 시그니처:", txSignature);
-  });
+        **ctx.accounts.vault_account.try_borrow_mut_lamports()? -= amount;
+        **ctx.accounts.user.try_borrow_mut_lamports()? += amount;
 
-  it("💰 2. 유저 → Vault(PDA)로 0.1 SOL 입금", async () => {
-    const depositAmount = new anchor.BN(0.1 * LAMPORTS_PER_SOL);
-    const txSignature = await program.methods
-      .depositSolToVault(depositAmount)
-      .accounts({
-        vaultAccount: vaultPda,
-        user: user.publicKey,
-      })
-      .rpc();
+        Ok(())
+    }
+}
 
-    const balance = await provider.connection.getBalance(vaultPda);
-    console.log("💰 PDA 잔고 (입금 후):", balance / LAMPORTS_PER_SOL, "SOL");
-    console.log("📄 트랜잭션 시그니처:", txSignature);
-  });
+// -----------------------
+// Accounts
+// -----------------------
 
-  it("📤 3. PDA → 유저로 0.05 SOL 출금", async () => {
-    const withdrawAmount = new anchor.BN(0.05 * LAMPORTS_PER_SOL);
-    const txSignature = await program.methods
-      .withdrawSolFromVault(withdrawAmount)
-      .accounts({
-        vaultAccount: vaultPda,
-        user: user.publicKey,
-      })
-      .rpc();
+#[derive(Accounts)]
+pub struct InitializeVault<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
 
-    const balance = await provider.connection.getBalance(vaultPda);
-    console.log("📉 PDA 잔고 (출금 후):", balance / LAMPORTS_PER_SOL, "SOL");
-    console.log("📄 트랜잭션 시그니처:", txSignature);
-  });
+    /// CHECK: PDA 계정이며, rent-exempt 이상 lamports 보유 및 owner가 프로그램으로 설정됨
+    #[account(
+        init,
+        seeds = [b"vault", user.key().as_ref()],
+        bump,
+        payer = user,
+        space = 8, // 최소 크기
+        owner = crate::ID
+    )]
+    pub vault_account: AccountInfo<'info>,
 
-  it("🔎 4. PDA 잔액 로그 출력", async () => {
-    const txSignature = await program.methods
-      .logVaultBalance()
-      .accounts({
-        vaultAccount: vaultPda,
-        user: user.publicKey,
-      })
-      .rpc();
+    pub system_program: Program<'info, System>,
+}
 
-    console.log("✅ 잔액 확인 로그 호출 완료");
-    console.log("📄 트랜잭션 시그니처:", txSignature);
-  });
-});
+#[derive(Accounts)]
+pub struct DepositSolToVault<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    /// CHECK: PDA Vault 계정
+    #[account(mut, seeds = [b"vault", user.key().as_ref()], bump)]
+    pub vault_account: AccountInfo<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct WithdrawSolFromVault<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    /// CHECK: PDA Vault 계정
+    #[account(mut, seeds = [b"vault", user.key().as_ref()], bump)]
+    pub vault_account: AccountInfo<'info>,
+}
+
+#[error_code]
+pub enum CustomError {
+    #[msg("잔액이 부족합니다.")]
+    InsufficientFunds,
+}
