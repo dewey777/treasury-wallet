@@ -6,8 +6,9 @@ declare_id!("AqejyYXgr792tntPRJajpBLMvhYCTFXQWRoBzUKp6TkN");
 pub mod treasury_your_wallet {
     use super::*;
 
-    /// 초기화 - PDA 계정을 생성하고, 해당 계정의 owner를 이 프로그램으로 설정
+    /// 초기화 - PDA 계정 생성 및 관리자(admin) 저장
     pub fn initialize_vault(ctx: Context<InitializeVault>) -> Result<()> {
+        ctx.accounts.vault_account.admin = ctx.accounts.user.key();
         Ok(())
     }
 
@@ -29,14 +30,20 @@ pub mod treasury_your_wallet {
         Ok(())
     }
 
-    /// Vault(PDA) → 유저로 SOL 출금
+    /// Vault(PDA) → 유저로 SOL 출금 (admin만 가능)
     pub fn withdraw_sol_from_vault(ctx: Context<WithdrawSolFromVault>, amount: u64) -> Result<()> {
-        let vault_balance = **ctx.accounts.vault_account.lamports.borrow();
+        // 관리자만 출금 가능
+        require_keys_eq!(
+            ctx.accounts.user.key(),
+            ctx.accounts.vault_account.admin,
+            CustomError::Unauthorized
+        );
 
+        let vault_balance = **ctx.accounts.vault_account.to_account_info().lamports.borrow();
         require!(vault_balance >= amount, CustomError::InsufficientFunds);
 
-        **ctx.accounts.vault_account.try_borrow_mut_lamports()? -= amount;
-        **ctx.accounts.user.try_borrow_mut_lamports()? += amount;
+        **ctx.accounts.vault_account.to_account_info().try_borrow_mut_lamports()? -= amount;
+        **ctx.accounts.user.to_account_info().try_borrow_mut_lamports()? += amount;
 
         Ok(())
     }
@@ -46,21 +53,24 @@ pub mod treasury_your_wallet {
 // Accounts
 // -----------------------
 
+#[account]
+pub struct VaultAccount {
+    pub admin: Pubkey, // 관리자 키
+}
+
 #[derive(Accounts)]
 pub struct InitializeVault<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
 
-    /// CHECK: PDA 계정이며, rent-exempt 이상 lamports 보유 및 owner가 프로그램으로 설정됨
     #[account(
         init,
         seeds = [b"vault", user.key().as_ref()],
         bump,
         payer = user,
-        space = 8, // 최소 크기
-        owner = crate::ID
+        space = 8 + 32, // 8 byte discriminator + 32 byte pubkey
     )]
-    pub vault_account: AccountInfo<'info>,
+    pub vault_account: Account<'info, VaultAccount>,
 
     pub system_program: Program<'info, System>,
 }
@@ -70,9 +80,8 @@ pub struct DepositSolToVault<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
 
-    /// CHECK: PDA Vault 계정
     #[account(mut, seeds = [b"vault", user.key().as_ref()], bump)]
-    pub vault_account: AccountInfo<'info>,
+    pub vault_account: Account<'info, VaultAccount>,
 
     pub system_program: Program<'info, System>,
 }
@@ -82,13 +91,15 @@ pub struct WithdrawSolFromVault<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
 
-    /// CHECK: PDA Vault 계정
-    #[account(mut, seeds = [b"vault", user.key().as_ref()], bump)]
-    pub vault_account: AccountInfo<'info>,
+    #[account(mut, seeds = [b"vault", vault_account.admin.as_ref()], bump)]
+    pub vault_account: Account<'info, VaultAccount>,
 }
 
 #[error_code]
 pub enum CustomError {
     #[msg("잔액이 부족합니다.")]
     InsufficientFunds,
+
+    #[msg("관리자만 출금할 수 있습니다.")]
+    Unauthorized,
 }
