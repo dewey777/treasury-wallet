@@ -6,13 +6,13 @@ declare_id!("AqejyYXgr792tntPRJajpBLMvhYCTFXQWRoBzUKp6TkN");
 pub mod treasury_your_wallet {
     use super::*;
 
-    /// 초기화 - PDA 계정 생성 및 관리자(admin) 저장
+    /// 초기화 - Vault 생성 + admin 저장
     pub fn initialize_vault(ctx: Context<InitializeVault>) -> Result<()> {
         ctx.accounts.vault_account.admin = ctx.accounts.user.key();
         Ok(())
     }
 
-    /// 유저 → Vault(PDA)로 SOL 입금
+    /// 유저 → Vault 입금
     pub fn deposit_sol_to_vault(ctx: Context<DepositSolToVault>, amount: u64) -> Result<()> {
         let ix = anchor_lang::solana_program::system_instruction::transfer(
             &ctx.accounts.user.key(),
@@ -30,19 +30,27 @@ pub mod treasury_your_wallet {
         Ok(())
     }
 
-    /// Vault(PDA) → 유저로 SOL 출금 (admin만 가능)
+    /// Vault → 유저 출금 (admin만 가능 + 1 SOL 이하만 가능)
     pub fn withdraw_sol_from_vault(ctx: Context<WithdrawSolFromVault>, amount: u64) -> Result<()> {
-        // 관리자만 출금 가능
+        let vault = &ctx.accounts.vault_account;
+
+        // ✅ 조건 1: 관리자만 출금 가능
         require_keys_eq!(
             ctx.accounts.user.key(),
-            ctx.accounts.vault_account.admin,
+            vault.admin,
             CustomError::Unauthorized
         );
 
-        let vault_balance = **ctx.accounts.vault_account.to_account_info().lamports.borrow();
+        // ✅ 조건 2: 출금 상한선 1 SOL
+        const MAX_WITHDRAW_AMOUNT: u64 = 1_000_000_000; // 1 SOL in lamports
+        require!(amount <= MAX_WITHDRAW_AMOUNT, CustomError::ExceedsMaxWithdrawal);
+
+        // ✅ 조건 3: Vault에 충분한 잔고
+        let vault_balance = **vault.to_account_info().lamports.borrow();
         require!(vault_balance >= amount, CustomError::InsufficientFunds);
 
-        **ctx.accounts.vault_account.to_account_info().try_borrow_mut_lamports()? -= amount;
+        // ✅ 출금 수행
+        **vault.to_account_info().try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.user.to_account_info().try_borrow_mut_lamports()? += amount;
 
         Ok(())
@@ -55,7 +63,7 @@ pub mod treasury_your_wallet {
 
 #[account]
 pub struct VaultAccount {
-    pub admin: Pubkey, // 관리자 키
+    pub admin: Pubkey,
 }
 
 #[derive(Accounts)]
@@ -102,4 +110,7 @@ pub enum CustomError {
 
     #[msg("관리자만 출금할 수 있습니다.")]
     Unauthorized,
+
+    #[msg("출금 한도를 초과했습니다. (최대 1 SOL)")]
+    ExceedsMaxWithdrawal,
 }
