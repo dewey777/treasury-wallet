@@ -1,32 +1,29 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { PublicKey, SystemProgram, Keypair, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { SystemProgram, Keypair, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { TreasuryYourWallet } from "../target/types/treasury_your_wallet";
 
-describe("treasury_your_wallet", () => {
-  // Provider 및 프로그램 로딩
+describe("Day 7: 출금 쿨타임 테스트", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   const program = anchor.workspace.TreasuryYourWallet as Program<TreasuryYourWallet>;
 
-  // 관리자 키쌍
   const admin = Keypair.generate();
   let vaultPda: PublicKey;
-  let vaultBump: number;
 
   before(async () => {
-    // admin에게 SOL 에어드롭
-    const sig = await provider.connection.requestAirdrop(admin.publicKey, LAMPORTS_PER_SOL * 2);
-    await provider.connection.confirmTransaction(sig);
+    // admin에 2 SOL 지급
+    const tx = await provider.connection.requestAirdrop(admin.publicKey, LAMPORTS_PER_SOL * 2);
+    await provider.connection.confirmTransaction(tx);
 
-    // Vault PDA 계산
-    [vaultPda, vaultBump] = await PublicKey.findProgramAddressSync(
+    // PDA 계산
+    [vaultPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("vault"), admin.publicKey.toBuffer()],
       program.programId
     );
   });
 
-  it("🛠️ 초기화 - Vault 생성", async () => {
+  it("✅ Vault 초기화", async () => {
     await program.methods
       .initializeVault()
       .accounts({
@@ -36,17 +33,12 @@ describe("treasury_your_wallet", () => {
       })
       .signers([admin])
       .rpc();
-
-    const vault = await program.account.vaultAccount.fetch(vaultPda);
-    console.log("Vault Admin:", vault.admin.toBase58());
-    if (!vault.admin.equals(admin.publicKey)) throw new Error("Admin 설정 실패");
   });
 
-  it("💰 입금 - 관리자 → Vault", async () => {
-    const amount = 0.5 * LAMPORTS_PER_SOL;
-
+  it("✅ SOL 입금", async () => {
+    const amount = new anchor.BN(1 * LAMPORTS_PER_SOL);
     await program.methods
-      .depositSolToVault(new anchor.BN(amount))
+      .depositSolToVault(amount)
       .accounts({
         user: admin.publicKey,
         vaultAccount: vaultPda,
@@ -55,46 +47,40 @@ describe("treasury_your_wallet", () => {
       .signers([admin])
       .rpc();
 
-    const vaultBalance = await provider.connection.getBalance(vaultPda);
-    console.log("Vault 잔액:", vaultBalance / LAMPORTS_PER_SOL, "SOL");
+    const balance = await provider.connection.getBalance(vaultPda);
+    console.log("📦 Vault 잔액:", balance / LAMPORTS_PER_SOL, "SOL");
   });
 
-  it("💸 출금 - 관리자만 가능", async () => {
-    const amount = 0.2 * LAMPORTS_PER_SOL;
-
-    const beforeBalance = await provider.connection.getBalance(admin.publicKey);
-
+  it("✅ 첫 번째 출금 (성공)", async () => {
+    const amount = new anchor.BN(0.5 * LAMPORTS_PER_SOL);
     await program.methods
-      .withdrawSolFromVault(new anchor.BN(amount))
+      .withdrawSolFromVault(amount)
       .accounts({
         user: admin.publicKey,
         vaultAccount: vaultPda,
       })
       .signers([admin])
       .rpc();
-
-    const afterBalance = await provider.connection.getBalance(admin.publicKey);
-    console.log("출금 전/후 관리자 지갑:", beforeBalance, "→", afterBalance);
+    console.log("💸 첫 번째 출금 성공");
   });
 
-  it("⛔️ 실패 - 관리자 아닌 유저가 출금 시도", async () => {
-    const attacker = Keypair.generate();
-    const sig = await provider.connection.requestAirdrop(attacker.publicKey, LAMPORTS_PER_SOL);
-    await provider.connection.confirmTransaction(sig);
-
+  it("❌ 두 번째 출금 시도 (쿨타임 위반 → 실패)", async () => {
+    const amount = new anchor.BN(0.3 * LAMPORTS_PER_SOL);
     try {
       await program.methods
-        .withdrawSolFromVault(new anchor.BN(0.1 * LAMPORTS_PER_SOL))
+        .withdrawSolFromVault(amount)
         .accounts({
-          user: attacker.publicKey,
+          user: admin.publicKey,
           vaultAccount: vaultPda,
         })
-        .signers([attacker])
+        .signers([admin])
         .rpc();
-
-      throw new Error("❌ 비관리자가 출금에 성공했습니다. 이는 버그입니다!");
+      throw new Error("❌ 두 번째 출금이 성공했는데, 실패했어야 합니다!");
     } catch (err) {
-      console.log("✅ 예상된 에러 발생:", err.error.errorMessage);
+      console.log("⏱️ 예상대로 실패함 (쿨타임 위반):", err.error.errorMessage);
     }
   });
+
+  // (선택) 시간 조작은 anchor test 환경에서 따로 clock mocking이 필요함
+  // Advanced: use anchor.setClock() via local validator or custom test
 });

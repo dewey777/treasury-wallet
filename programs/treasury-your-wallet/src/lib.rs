@@ -6,13 +6,14 @@ declare_id!("AqejyYXgr792tntPRJajpBLMvhYCTFXQWRoBzUKp6TkN");
 pub mod treasury_your_wallet {
     use super::*;
 
-    /// 초기화 - Vault 생성 + admin 저장
+    /// Vault 생성 및 관리자 저장
     pub fn initialize_vault(ctx: Context<InitializeVault>) -> Result<()> {
         ctx.accounts.vault_account.admin = ctx.accounts.user.key();
+        ctx.accounts.vault_account.last_withdraw_ts = 0; // 최초는 0으로 설정
         Ok(())
     }
 
-    /// 유저 → Vault 입금
+    /// SOL 입금 (user → vault)
     pub fn deposit_sol_to_vault(ctx: Context<DepositSolToVault>, amount: u64) -> Result<()> {
         let ix = anchor_lang::solana_program::system_instruction::transfer(
             &ctx.accounts.user.key(),
@@ -30,22 +31,26 @@ pub mod treasury_your_wallet {
         Ok(())
     }
 
-    /// Vault → 유저 출금 (admin만 가능 + 1 SOL 이하만 가능)
+    /// SOL 출금 (vault → user)  
+    /// 관리자만 가능, 출금 상한선, 쿨타임 1시간 적용
     pub fn withdraw_sol_from_vault(ctx: Context<WithdrawSolFromVault>, amount: u64) -> Result<()> {
-        let vault = &ctx.accounts.vault_account;
+        let vault = &mut ctx.accounts.vault_account;
+        let clock = Clock::get()?;
 
-        // ✅ 조건 1: 관리자만 출금 가능
-        require_keys_eq!(
-            ctx.accounts.user.key(),
-            vault.admin,
-            CustomError::Unauthorized
-        );
+        // ✅ 관리자만 출금 가능
+        require_keys_eq!(ctx.accounts.user.key(), vault.admin, CustomError::Unauthorized);
 
-        // ✅ 조건 2: 출금 상한선 1 SOL
-        const MAX_WITHDRAW_AMOUNT: u64 = 1_000_000_000; // 1 SOL in lamports
-        require!(amount <= MAX_WITHDRAW_AMOUNT, CustomError::ExceedsMaxWithdrawal);
+        // ✅ 출금 상한선: 1 SOL
+        const MAX_WITHDRAW: u64 = 1_000_000_000; // 1 SOL in lamports
+        require!(amount <= MAX_WITHDRAW, CustomError::ExceedsMaxWithdrawal);
 
-        // ✅ 조건 3: Vault에 충분한 잔고
+        // ✅ 쿨타임: 1시간(=3600초)
+        let now = clock.unix_timestamp;
+        let elapsed = now - vault.last_withdraw_ts;
+        const COOLDOWN_SECONDS: i64 = 3600;
+        require!(elapsed >= COOLDOWN_SECONDS, CustomError::TooEarlyToWithdraw);
+
+        // ✅ 잔액 확인
         let vault_balance = **vault.to_account_info().lamports.borrow();
         require!(vault_balance >= amount, CustomError::InsufficientFunds);
 
@@ -53,17 +58,21 @@ pub mod treasury_your_wallet {
         **vault.to_account_info().try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.user.to_account_info().try_borrow_mut_lamports()? += amount;
 
+        // ✅ 마지막 출금 시간 기록
+        vault.last_withdraw_ts = now;
+
         Ok(())
     }
 }
 
-// -----------------------
-// Accounts
-// -----------------------
+// ------------------------------
+// Account 구조체들
+// ------------------------------
 
 #[account]
 pub struct VaultAccount {
-    pub admin: Pubkey,
+    pub admin: Pubkey,            // 관리자 지갑 주소
+    pub last_withdraw_ts: i64,    // 마지막 출금 유닉스 시간
 }
 
 #[derive(Accounts)]
@@ -76,7 +85,7 @@ pub struct InitializeVault<'info> {
         seeds = [b"vault", user.key().as_ref()],
         bump,
         payer = user,
-        space = 8 + 32, // 8 byte discriminator + 32 byte pubkey
+        space = 8 + 32 + 8, // Anchor 계정 디스크 크기
     )]
     pub vault_account: Account<'info, VaultAccount>,
 
@@ -103,6 +112,10 @@ pub struct WithdrawSolFromVault<'info> {
     pub vault_account: Account<'info, VaultAccount>,
 }
 
+// ------------------------------
+// 커스텀 에러
+// ------------------------------
+
 #[error_code]
 pub enum CustomError {
     #[msg("잔액이 부족합니다.")]
@@ -113,4 +126,7 @@ pub enum CustomError {
 
     #[msg("출금 한도를 초과했습니다. (최대 1 SOL)")]
     ExceedsMaxWithdrawal,
+
+    #[msg("출금 간 쿨타임이 아직 지나지 않았습니다. (1시간 제한)")]
+    TooEarlyToWithdraw,
 }
