@@ -6,10 +6,13 @@ declare_id!("AqejyYXgr792tntPRJajpBLMvhYCTFXQWRoBzUKp6TkN");
 pub mod treasury_your_wallet {
     use super::*;
 
-    /// Vault 생성 및 관리자 저장
-    pub fn initialize_vault(ctx: Context<InitializeVault>) -> Result<()> {
-        ctx.accounts.vault_account.admin = ctx.accounts.user.key();
-        ctx.accounts.vault_account.last_withdraw_ts = 0; // 최초는 0으로 설정
+    /// Vault 생성 및 관리자, 출금 한도, 쿨타임 저장
+    pub fn initialize_vault(ctx: Context<InitializeVault>, max_withdraw: u64, cooldown: i64) -> Result<()> {
+        let vault = &mut ctx.accounts.vault_account;
+        vault.admin = ctx.accounts.user.key();
+        vault.last_withdraw_ts = 0; // 최초는 0으로 설정
+        vault.max_withdraw = max_withdraw;
+        vault.cooldown = cooldown;
         Ok(())
     }
 
@@ -32,7 +35,7 @@ pub mod treasury_your_wallet {
     }
 
     /// SOL 출금 (vault → user)  
-    /// 관리자만 가능, 출금 상한선, 쿨타임 1시간 적용
+    /// 관리자만 가능, 출금 상한선, 쿨타임 적용 (유저별)
     pub fn withdraw_sol_from_vault(ctx: Context<WithdrawSolFromVault>, amount: u64) -> Result<()> {
         let vault = &mut ctx.accounts.vault_account;
         let clock = Clock::get()?;
@@ -40,15 +43,13 @@ pub mod treasury_your_wallet {
         // ✅ 관리자만 출금 가능
         require_keys_eq!(ctx.accounts.user.key(), vault.admin, CustomError::Unauthorized);
 
-        // ✅ 출금 상한선: 1 SOL
-        const MAX_WITHDRAW: u64 = 1_000_000_000; // 1 SOL in lamports
-        require!(amount <= MAX_WITHDRAW, CustomError::ExceedsMaxWithdrawal);
+        // ✅ 출금 상한선: 유저별
+        require!(amount <= vault.max_withdraw, CustomError::ExceedsMaxWithdrawal);
 
-        // ✅ 쿨타임: 1시간(=3600초)
+        // ✅ 쿨타임: 유저별
         let now = clock.unix_timestamp;
         let elapsed = now - vault.last_withdraw_ts;
-        const COOLDOWN_SECONDS: i64 = 3600;
-        require!(elapsed >= COOLDOWN_SECONDS, CustomError::TooEarlyToWithdraw);
+        require!(elapsed >= vault.cooldown, CustomError::TooEarlyToWithdraw);
 
         // ✅ 잔액 확인
         let vault_balance = **vault.to_account_info().lamports.borrow();
@@ -73,6 +74,8 @@ pub mod treasury_your_wallet {
 pub struct VaultAccount {
     pub admin: Pubkey,            // 관리자 지갑 주소
     pub last_withdraw_ts: i64,    // 마지막 출금 유닉스 시간
+    pub max_withdraw: u64,        // 출금 한도 (lamports)
+    pub cooldown: i64,            // 쿨타임 (초)
 }
 
 #[derive(Accounts)]
@@ -85,7 +88,7 @@ pub struct InitializeVault<'info> {
         seeds = [b"vault", user.key().as_ref()],
         bump,
         payer = user,
-        space = 8 + 32 + 8, // Anchor 계정 디스크 크기
+        space = 8 + 32 + 8 + 8 + 8, // Anchor 계정 디스크 크기
     )]
     pub vault_account: Account<'info, VaultAccount>,
 

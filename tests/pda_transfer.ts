@@ -62,6 +62,9 @@ describe("Day 7: 출금 쿨타임 테스트", () => {
       .signers([admin])
       .rpc();
     console.log("💸 첫 번째 출금 성공");
+    
+    // 2초 대기
+    await new Promise(resolve => setTimeout(resolve, 2000));
   });
 
   it("❌ 두 번째 출금 시도 (쿨타임 위반 → 실패)", async () => {
